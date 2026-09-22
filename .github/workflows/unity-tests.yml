@@ -1,0 +1,83 @@
+name: Unity EditMode Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  # Must match ProjectSettings/ProjectVersion.txt. Personal has no serial.
+  UNITY_EDITOR_VERSION: "6000.6.0f1"
+  UNITY_CLI_CHANNEL: beta
+  UNITY_NON_INTERACTIVE: "1"
+  UNITY_NO_CONSENT_PROMPT: "1"
+  UNITY_NO_CRASH_REPORT: "1"
+  UNITY_NO_UPDATE_CHECK: "1"
+
+jobs:
+  editmode-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Unity CLI
+        run: |
+          curl -fsSL https://public-cdn.cloud.unity3d.com/hub/prod/cli/install.sh | UNITY_CLI_CHANNEL=beta bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          unity --version
+
+      - name: Install Unity Editor
+        run: |
+          unity install "$UNITY_EDITOR_VERSION" --yes --accept-eula
+          unity editors -i
+
+      # Personal has no serial, and `unity license activate --personal` cannot
+      # run here: the licensing service rejects service-account tokens.
+      # Unattended activation on a GitHub-hosted runner needs a .ulf that was
+      # issued for that runner (base64 secret UNITY_LICENSE_FILE_BASE64).
+      # The .ulf already on a signed-in dev machine is machine-bound and will
+      # not activate on ubuntu-latest.
+      - name: Activate license file
+        env:
+          UNITY_LICENSE_FILE_BASE64: ${{ secrets.UNITY_LICENSE_FILE_BASE64 }}
+        run: |
+          if [ -z "$UNITY_LICENSE_FILE_BASE64" ]; then
+            echo "Unity Personal does not have a serial, so UNITY_SERIAL is not used."
+            echo "GitHub-hosted runners also cannot run: unity license activate --personal"
+            echo "Add secret UNITY_LICENSE_FILE_BASE64, or use a self-hosted runner that is already signed in to Unity Personal."
+            exit 1
+          fi
+          printf '%s' "$UNITY_LICENSE_FILE_BASE64" | base64 -d > "$RUNNER_TEMP/unity.ulf"
+          unity license activate --file "$RUNNER_TEMP/unity.ulf"
+
+      - name: Run EditMode tests
+        run: |
+          unity test "$GITHUB_WORKSPACE" \
+            --editor-version "$UNITY_EDITOR_VERSION" \
+            --mode EditMode \
+            --output "$GITHUB_WORKSPACE/test-results.xml" \
+            --report-format nunit,junit \
+            --allow-install \
+            --timeout 600 \
+            --format github \
+            -- \
+            -nographics
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editmode-test-results
+          path: |
+            test-results.xml
+            test-results.junit.xml
+            Logs/**
+          if-no-files-found: warn
+
+      - name: Return license
+        if: always()
+        run: unity license return --yes || true
